@@ -1,0 +1,718 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mx:Application xmlns:mx="http://www.adobe.com/2006/mxml" layout="absolute" historyManagementEnabled="false" initialize="InitData();" height="100%">
+	<mx:Script><![CDATA[
+		import com.adobe.csawlib.indesign.InDesign;
+		import com.adobe.indesign.Application;
+		import com.adobe.indesign.ContainerType;
+		import com.adobe.indesign.Document;
+		import com.adobe.indesign.ExcelImportPreference;
+		import com.adobe.indesign.MetadataPreference;
+		import com.adobe.indesign.TextFrame;
+		import com.adobe.indesign.TextFrames;
+		import com.tridion.cs.*;
+		
+		import flash.desktop.Clipboard;
+		import flash.desktop.ClipboardFormats;
+		import flash.desktop.ClipboardTransferMode;
+		import flash.desktop.NativeDragManager;
+		import flash.desktop.NativeDragOptions;
+		import flash.events.Event;
+		import flash.filesystem.File;
+		
+		import mx.collections.ArrayCollection;
+		import mx.collections.XMLListCollection;
+		import mx.controls.Alert;
+		import mx.controls.buttonBarClasses.ButtonBarButton;
+		import mx.core.DragSource;
+		import mx.events.DragEvent;
+		import mx.events.DropdownEvent;
+		import mx.events.ItemClickEvent;
+		import mx.events.ListEvent;
+		import mx.events.TreeEvent;
+		import mx.graphics.codec.PNGEncoder;
+		import mx.managers.DragManager;
+		import mx.rpc.Fault;
+		import mx.rpc.events.*;
+		import mx.rpc.soap.LoadEvent;
+		import mx.rpc.soap.Operation;
+		import mx.utils.Base64Decoder;
+		import mx.utils.ObjectProxy;
+		
+		protected var app:com.adobe.indesign.Application
+		protected var channel:BasicHttpClient;
+		protected var downloadChannel:StreamDownloadClient;
+		protected var openItem:XML;
+		protected var currentComponent:ObjectProxy;
+		
+		protected const XMP_NS:String = "http://ns.adobe.com/xap/1.0/";
+		
+		// XML Data Sources
+		[Bindable]
+		protected var listPublications:XMLListCollection;
+		[Bindable]
+		protected var listPubItems:XMLListCollection;
+		[Bindable]
+		protected var listDesignFields:XMLListCollection;
+		[Bindable]
+		protected var listMetadataFields:XMLListCollection;
+		[Bindable]
+		protected var listUsingItems:XMLListCollection;
+		
+		// IMG Data Sources
+		[Bindable]
+		protected var multimediaData:ArrayCollection;
+		
+		// SDL Tridion Icons
+		[Bindable]
+		[Embed(source="icons/Folder.png")]
+		protected var folderIcon:Class;
+		[Bindable]
+		[Embed(source="icons/Component.png")]
+		protected var componentIcon:Class;
+		[Bindable]
+		[Embed(source="icons/Publication.png")]
+		protected var publicationIcon:Class;
+		[Bindable]
+		[Embed(source="icons/Rtf.png")]
+		protected var rtfIcon:Class;
+		[Bindable]
+		[Embed(source="icons/Text.png")]
+		protected var textIcon:Class;
+		[Bindable]
+		[Embed(source="icons/Date.png")]
+		protected var dateIcon:Class;
+		[Bindable]
+		[Embed(source="icons/png.png")]
+		protected var pngIcon:Class;
+		[Bindable]
+		[Embed(source="icons/jpg.png")]
+		protected var jpgIcon:Class;
+		[Bindable]
+		[Embed(source="icons/gif.png")]
+		protected var gifIcon:Class;
+		[Bindable]
+		[Embed(source="icons/Page.png")]
+		protected var pageIcon:Class;
+		//* BEGIN EVENT HANDLERS *//
+		
+		protected function InitData():void {	
+			app = InDesign.app;
+			
+			InitBasicHttpChannel();
+			InitDownloadHttpChannel();
+			
+			if (app.documents.length == 0) {
+				app.documents.add();
+			}
+			
+			var backButton:ButtonBarButton = ButtonBarButton(btnBarCommands.getChildAt(2));
+			backButton.visible = false;
+		}
+		
+		protected function InitBasicHttpChannel():void {
+			var OnChannelLoaded:Function = function(event:LoadEvent):void {
+				event.currentTarget.removeEventListener(LoadEvent.LOAD, OnChannelLoaded);
+				
+				channel.GetListPublicationsXml(OnGetPublications, OnError);
+			}; 
+			var OnGetPublications:Function = function(event:ResultEvent):void {
+				event.currentTarget.removeEventListener(ResultEvent.RESULT, OnGetPublications);
+				
+				var items:XMLList = XML(event.result).descendants(new QName(channel.TRIDION_5_NS, "Item"));
+				listPublications = new XMLListCollection(items);
+			};
+			channel = new BasicHttpClient(OnChannelLoaded);	
+		}
+		
+		protected function InitDownloadHttpChannel():void {
+			var OnChannelLoaded:Function = function(event:LoadEvent):void {
+				event.currentTarget.removeEventListener(ResultEvent.RESULT, OnChannelLoaded);
+			};
+			downloadChannel = new StreamDownloadClient(OnChannelLoaded);
+		}
+		
+		protected function cbPublications_openHandler(event:DropdownEvent):void {
+			// Add a reference for the combobox icon function
+			cbPublications.dropdown.iconFunction = cbPublications_iconFunction;
+		}
+		
+		protected function cbPublications_changeHandler(event:ListEvent):void {
+			var item:XML = XML(event.currentTarget.selectedItem);
+			var publicationId:String = item.attribute("ID").toString();
+			//listPubItems = null;
+			var OnPublicationsItemRead:Function = function(event:ResultEvent):void {
+				event.currentTarget.removeEventListener(ResultEvent.RESULT, OnPublicationsItemRead);
+				
+				var publication:ObjectProxy = event.result as ObjectProxy;
+				var rootFolderId:String = publication.RootFolder.IdRef;
+				
+				var itemTypes:Array = [ "Folder", "Component" ];
+				channel.GetListOrgItemItemsXml(rootFolderId, itemTypes, false, OnGetListOrgItemItems, OnError);	
+			};
+				
+			var OnGetListOrgItemItems:Function = function(event:ResultEvent):void{
+				event.currentTarget.removeEventListener(ResultEvent.RESULT, OnGetListOrgItemItems);
+				
+				var orgItemItems:XMLList = XML(event.result).descendants(new QName(channel.TRIDION_5_NS, "Item"));
+				listPubItems = new XMLListCollection(orgItemItems);
+			};
+			channel.ReadItem(publicationId, OnPublicationsItemRead, OnError);
+			
+			var backButton:ButtonBarButton = ButtonBarButton(btnBarCommands.getChildAt(2));
+			backButton.visible = false;
+		}
+		
+		protected function cbPublications_iconFunction(item:XML):Class {
+			return publicationIcon;
+		}
+		
+		protected function trPubItems_iconFunction(item:XML):Class {
+			var type:String = item.@Type.toString(); 
+			if (type == "2") {
+				return folderIcon;
+			}
+			else {
+				var mimeType:String = item.@MIMEType.toString(); 
+				switch (mimeType) {
+					case "image/png":
+						return pngIcon;
+					case "image/jpg":
+						return jpgIcon;
+					case "image/gif":
+						return gifIcon;
+				}
+			}
+			return componentIcon;
+		}
+		
+		protected function trFields_iconFunction(item:XML):Class {
+			switch (item.@Type.toString()) {
+				case "XhtmlFieldDefinitionData":
+					return rtfIcon;
+				case "SingleLineTextFieldDefinitionData":
+				case "MultiLineTextFieldDefinitionData":
+					return textIcon;
+				case "DateFieldDefinitionData":
+					return dateIcon;
+				case "MultimediaLinkFieldDefinitionData":
+					return pngIcon;
+				default:
+					return null;
+			}
+		}
+		
+		protected function trPubItems_labelFunction(item:XML):String {
+			if (item.@Type == "2") {
+				item.@isBranch = "true";
+			}
+			return item.@Title;
+		}
+		
+		protected function trWhereUsed_labelFunction(item:XML):String {
+			return "Title: " + item.@Title + ", Path: " + item.@Path;
+		}
+		
+		protected function trWhereUsed_iconFunction(item:XML):Class {
+			switch (item.@Type.toString()) {
+				case "16":
+					return componentIcon;
+				case "64":
+					return pageIcon;
+				default:
+					return null;
+			}
+		}
+		
+		protected function trPubItems_itemOpenHandler(event:TreeEvent):void {
+			openItem = XML(event.item);
+			var folderId:String = openItem.@ID;
+			
+			var itemTypes:Array = [ "Folder", "Component" ];
+			var OnGetListOrgItemItems:Function = function(event:ResultEvent):void{
+				event.currentTarget.removeEventListener(ResultEvent.RESULT, OnGetListOrgItemItems);
+				
+				var orgItemItems:XMLList = XML(event.result).descendants(new QName(channel.TRIDION_5_NS, "Item"));
+				if (openItem != null && orgItemItems != null && orgItemItems.length() > 0) {
+					if (openItem.@isLoaded != "true") {
+						openItem.@isLoaded = "true";
+						openItem.appendChild(orgItemItems);	
+					}
+				}
+			};
+			channel.GetListOrgItemItemsXml(folderId, itemTypes, false, OnGetListOrgItemItems, OnError);
+		}
+		
+		protected function trPubItems_changeHandler(event:Event):void {
+			var itemXML:XML = XML(trPubItems.selectedItem);
+			var type:String = itemXML.@Type.toString(); 
+			if (type == "16") {
+				tabNavigator.visible = true;
+				
+				var OnComponentItemRead:Function = function(event:ResultEvent):void {
+					event.currentTarget.removeEventListener(ResultEvent.RESULT, OnComponentItemRead);
+					
+					currentComponent = event.result as ObjectProxy;
+					
+					var isMultimedia:Boolean = currentComponent.ComponentType == "Multimedia";
+					vBoxDesignFields.visible = !isMultimedia;
+					vBoxMultimedia.visible = isMultimedia;
+					tabNavigator.getTabAt(0).visible = !isMultimedia;
+					tabNavigator.getTabAt(1).visible = isMultimedia;
+					tabNavigator.getTabAt(0).includeInLayout = !isMultimedia;
+					tabNavigator.getTabAt(1).includeInLayout = isMultimedia;
+					tabNavigator.selectedIndex = isMultimedia?1:0;
+					
+					var schemaId:String = currentComponent.Schema.IdRef;
+					channel.ReadSchemaFields(schemaId, true, OnComponentSchemaFieldsRead, OnError);
+					
+					if (isMultimedia) {
+						var componentId:String = currentComponent.Id.toString();
+						
+						var OnDownloadBinaryContent:Function = function(event:ResultEvent):void {
+							event.currentTarget.removeEventListener(ResultEvent.RESULT, OnDownloadBinaryContent);
+							
+							var data:Object = { Title:itemXML.@Title, Bitmap:event.result };
+							var dataArr:Array = new Array();
+							dataArr.push(data);
+							
+							multimediaData = new ArrayCollection(dataArr);
+						};
+						downloadChannel.DownloadBinaryContent(componentId, OnDownloadBinaryContent, OnError);
+					}
+					
+					channel.GetListUsingItems(currentComponent.Id.toString(), [ "Component", "Page" ], OnGetListUsingItems, OnError);
+				};
+				
+				var OnComponentSchemaFieldsRead:Function = function(event:ResultEvent):void {
+					event.currentTarget.removeEventListener(ResultEvent.RESULT, OnComponentSchemaFieldsRead);
+					
+					var fieldsDefQN:QName = new QName(channel.TRIDION_NS, "ItemFieldDefinitionData");
+					if (currentComponent.ComponentType != "Multimedia") {
+						var fieldsQN:QName = new QName(channel.TRIDION_NS, "Fields");
+						var designFields:XMLList = XML(event.result).descendants(fieldsQN).descendants(fieldsDefQN);
+						listDesignFields = new XMLListCollection(SimplifyItemsDefinition(designFields, false));
+					}
+					
+					var metadataQN:QName = new QName(channel.TRIDION_NS, "MetadataFields");
+					var metadataFields:XMLList = XML(event.result).descendants(metadataQN).descendants(fieldsDefQN);
+					listMetadataFields = new XMLListCollection(SimplifyItemsDefinition(metadataFields, true));
+				};
+				
+				var OnGetListUsingItems:Function = function(event:ResultEvent):void {
+					event.currentTarget.removeEventListener(ResultEvent.RESULT, OnGetListUsingItems);
+					
+					var usingItems:XMLList = XML(event.result).descendants(new QName(channel.TRIDION_5_NS, "Item"));
+					listUsingItems = new XMLListCollection(usingItems);
+				};
+				
+				channel.ReadItem(itemXML.@ID, OnComponentItemRead, OnError);
+				
+				var backButton:ButtonBarButton = ButtonBarButton(btnBarCommands.getChildAt(2));
+				backButton.visible = false;
+			}
+		}
+		
+		protected function trFields_itemDoubleClickHandler(event:ListEvent):void
+		{
+			var item:XML = XML(event.currentTarget.selectedItem);
+			if (item.@Type.toString() == "MultimediaLinkFieldDefinitionData") {
+				vBoxDesignFields.visible = false;
+				vBoxMultimedia.visible = true;
+				tabNavigator.getTabAt(0).visible = false;
+				tabNavigator.getTabAt(1).visible = true;
+				tabNavigator.getTabAt(0).includeInLayout = false;
+				tabNavigator.getTabAt(1).includeInLayout = true;
+				tabNavigator.selectedIndex = 1;
+				
+				var OnComponentRead:Function = function(event:ResultEvent):void {
+					event.currentTarget.removeEventListener(ResultEvent.RESULT, OnComponentRead);
+					
+					var componentXml:XML = XML(event.result);
+					var content:XML = componentXml.descendants(new QName(channel.TRIDION_NS, "Content"))[0];
+					
+					var lContent:XML = XML(content.children()[0].toString());
+					var ns:Namespace = lContent.namespace("");
+					var multimediaItemXml:XML = lContent.descendants(new QName(ns, item.@Name))[0];
+					
+					var XLINK_NS:Namespace = new Namespace(channel.XLINK_NS);
+					var multimediaId:String = multimediaItemXml.@XLINK_NS::href;
+					
+					var OnDownloadBinaryContent:Function = function (event:ResultEvent):void {
+						event.currentTarget.removeEventListener(ResultEvent.RESULT, OnDownloadBinaryContent);
+						
+						var data:Object = { Title:multimediaItemXml.@XLINK_NS::title, Bitmap:event.result };
+						var dataArr:Array = new Array();
+						dataArr.push(data);
+						
+						multimediaData = new ArrayCollection(dataArr);
+						
+						var backButton:ButtonBarButton = ButtonBarButton(btnBarCommands.getChildAt(2));
+						backButton.visible = true;
+					};
+					
+					downloadChannel.DownloadBinaryContent(multimediaId, OnDownloadBinaryContent, OnError);
+				};
+				
+				channel.ReadItemXml(currentComponent.Id, OnComponentRead, OnError);
+			}
+		}
+		
+		protected function trFields_dragStartHandler(event:DragEvent):void {
+			var source:XML = null;
+			var item:XML = XML(event.currentTarget.selectedItem);
+			if (item.@IsMetadata != "true") {
+				source = XML(this.currentComponent.Content);
+			}
+			else {
+				source = XML(this.currentComponent.Metadata);
+			}
+			
+			var ns:Namespace = source.namespace("");
+			var value:String = null;
+			
+			var clipb:Clipboard = new Clipboard();
+			switch (item.@Type.toString()) {
+				case "XhtmlFieldDefinitionData":
+					value = source.descendants(new QName(ns.uri, item.@Name))[0].children().toString();
+					clipb.setData(ClipboardFormats.TEXT_FORMAT, value);
+					break;
+				case "SingleLineTextFieldDefinitionData":
+				case "MultiLineTextFieldDefinitionData":
+				case "DateFieldDefinitionData":
+					value = source.descendants(new QName(ns.uri, item.@Name))[0].text();
+					clipb.setData(ClipboardFormats.TEXT_FORMAT, value);
+					break;
+				default:
+					value = source.descendants(new QName(ns.uri, item.@Name))[0].text();
+					clipb.setData(ClipboardFormats.TEXT_FORMAT, value);
+					break;
+			}
+			var opts:NativeDragOptions = new NativeDragOptions();
+			opts.allowCopy = true;
+			opts.allowLink = true;
+			opts.allowMove = false;
+			
+			var OnNativeDragComplete:Function = function(event:NativeDragEvent):void {
+				event.currentTarget.removeEventListener(NativeDragEvent.NATIVE_DRAG_COMPLETE, OnNativeDragComplete);
+				
+				var item:XML = XML(event.currentTarget.selectedItem);
+				var componentId:String = currentComponent.Id.toString();
+				var text:TextFrame = app.activeDocument.textFrames.firstItem()
+				text.insertLabel("ComponentId", componentId);
+				text.insertLabel("FieldName", item.@Name);
+				text.insertLabel("IsMetadata", item.@IsMetadata);
+			};
+			event.currentTarget.addEventListener(NativeDragEvent.NATIVE_DRAG_COMPLETE, OnNativeDragComplete);
+			NativeDragManager.doDrag(trDesignFields, clipb, null, null, opts);
+		}
+		
+		protected function tlImages_dragStartHandler(event:DragEvent):void {
+			var tileList:TileList = TileList(event.currentTarget);
+			var itemComponent:Object = tileList.itemToItemRenderer(tileList.selectedItem);
+			var bitmap:BitmapData = itemComponent.imgMultimedia.content.bitmapData;
+			
+			var clipb:Clipboard = new Clipboard();
+			clipb.setData(ClipboardFormats.BITMAP_FORMAT, bitmap);
+			
+			var opts:NativeDragOptions = new NativeDragOptions();
+			opts.allowCopy = true;
+			opts.allowLink = true;
+			opts.allowMove = false;
+			//bitmap.transparent = true;
+			NativeDragManager.doDrag(tileList, clipb, bitmap, null, opts);
+		}
+		
+		protected function btnBarCommands_itemClickHandler(event:ItemClickEvent):void {
+			var textFrames:TextFrames = app.activeDocument.textFrames;
+			var textToUpdate:Array = [];
+			
+			for (var index:int = 0; index < textFrames.length; index++) {
+				var text:TextFrame = textFrames.item(index);
+				
+				var componentId:String = text.extractLabel("ComponentId");
+				var fieldName:String = text.extractLabel("FieldName");
+				var isMetadata:String = text.extractLabel("IsMetadata");
+				
+				var process:Boolean = componentId != "" && fieldName != "" && isMetadata != "";
+				if (process) {
+					textToUpdate.push(text);
+				}
+			}
+			if (textToUpdate.length > 0) {
+				var ind:Number = 0;
+				var length:Number = textFrames.length;
+				
+				switch (event.item.label) {
+					case "Update":
+						UpdateComponent(ind, length, textToUpdate);
+						break;
+					case "Refresh":
+						RefreshComponent(ind, length, textToUpdate);
+						break;
+				}
+			}
+			else {
+				switch (event.item.label) {
+					case "Back":
+						vBoxDesignFields.visible = true;
+						vBoxMultimedia.visible = false;
+						tabNavigator.getTabAt(0).visible = true;
+						tabNavigator.getTabAt(1).visible = false;
+						tabNavigator.getTabAt(0).includeInLayout = true;
+						tabNavigator.getTabAt(1).includeInLayout = false;
+						tabNavigator.selectedIndex = 0;
+						
+						var backButton:ButtonBarButton = ButtonBarButton(btnBarCommands.getChildAt(2));
+						backButton.visible = false;
+						break;
+				}
+			}
+		}
+		//* END EVENT HANDLERS *//
+		
+		
+		//* BEGIN UTIL FUNCTIONS *//
+		// Simplify the items definition xml structure
+		private function SimplifyItemsDefinition(itemsDefinition:XMLList, isMedatada:Boolean) : XMLList {
+			var simpleItemsDefinition:XMLList = new XMLList(<Root></Root>);
+			var tridionNS:Namespace = new Namespace(channel.TRIDION_NS);
+			var xsdInstNS:Namespace = new Namespace(channel.XSDI_NS);
+			
+			for (var index:String in itemsDefinition) {
+				var itemDefXML:XML = XML(itemsDefinition[index]);
+				
+				var desc:String = itemDefXML.tridionNS::Description;
+				var name:String = itemDefXML.tridionNS::Name;
+				var type:String = itemDefXML.@xsdInstNS::type.split(":")[1];
+				
+				var itemXML:XML = <ItemDefinition Description={desc} Name={name} Type={type} IsMetadata={isMedatada}></ItemDefinition>;
+				simpleItemsDefinition.appendChild(itemXML);
+			}
+			return simpleItemsDefinition.children();
+		}
+		
+		private function UpdateComponent(index:Number, length:Number, textToUpdate:Array):void {
+			var text:TextFrame = TextFrame(textToUpdate[index]);
+			
+			var componentId:String = text.extractLabel("ComponentId");
+			var fieldName:String = text.extractLabel("FieldName");
+			var isMetadata:String = text.extractLabel("IsMetadata");
+			
+			var componentXml:XML;
+			var OnComponentRead:Function = function(event:ResultEvent):void {
+				event.currentTarget.removeEventListener(ResultEvent.RESULT, OnComponentRead);
+				
+				componentXml = XML(event.result);
+				channel.CheckOut(componentId, true, OnComponentPreSave, OnError);
+			};
+			
+			var OnComponentPreSave:Function = function(event:ResultEvent):void {
+				event.currentTarget.removeEventListener(ResultEvent.RESULT, OnComponentPreSave);
+				
+				var content:XML = componentXml.descendants(new QName(channel.TRIDION_NS, "Content"))[0];
+				var metadata:XML = componentXml.descendants(new QName(channel.TRIDION_NS, "Metadata"))[0];
+				
+				var ns:Namespace;
+				if (isMetadata == "false") {
+					var lContent:XML = XML(content.children()[0].toString());
+					ns = lContent.namespace("");
+					lContent.descendants(new QName(ns, fieldName))[0] = text.contents;
+					content.children()[0] = lContent;
+				}
+				else {
+					var lMetadata:XML = XML(componentXml.children()[0].toString());
+					ns = lMetadata.namespace("");
+					lMetadata.descendants(new QName(ns, fieldName))[0] = text.contents;
+					metadata.children()[0] = lMetadata;
+				}
+				
+				var deltaData:XMLList = componentXml.descendants(new QName(channel.CORESERVICE_NS, "ReadResult")).children();
+				channel.Save(deltaData, OnComponentSave, OnError);
+			};
+			
+			var OnComponentSave:Function = function(event:ResultEvent):void {
+				event.currentTarget.removeEventListener(ResultEvent.RESULT, OnComponentSave);
+				channel.CheckIn(componentId, OnComponentCheckIn, OnError);
+			};
+			
+			var OnComponentCheckIn:Function = function(event:ResultEvent):void {
+				event.currentTarget.removeEventListener(ResultEvent.RESULT, OnComponentCheckIn);
+				index++;
+				if (index < length) {
+					UpdateComponent(index, length, textToUpdate);
+				}
+				else {
+					Alert.show("Changes promoted to SDL Tridion sucessfully.", "In Design Connector", Alert.OK, Sprite(mx.core.Application.application));
+				}
+			};
+			
+			var OnError:Function = function (event:FaultEvent):void {
+				event.currentTarget.removeEventListener(FaultEvent.FAULT, OnError);
+				Alert.show(event.message.toString(), "In Design Connector", Alert.OK, Sprite(mx.core.Application.application));
+				
+				trace(event.message.toString());
+				index++;
+				if (index < length) {
+					UpdateComponent(index, length, textToUpdate);
+				}
+			};
+			channel.ReadItemXml(componentId, OnComponentRead, OnError);
+		}
+		
+		private function RefreshComponent(index:Number, length:Number, textToUpdate:Array):void {
+			var text:TextFrame = TextFrame(textToUpdate[index]);
+			
+			var componentId:String = text.extractLabel("ComponentId");
+			var fieldName:String = text.extractLabel("FieldName");
+			var isMetadata:String = text.extractLabel("IsMetadata");
+			
+			var OnComponentRead:Function = function(event:ResultEvent):void {
+				event.currentTarget.removeEventListener(ResultEvent.RESULT, OnComponentRead);
+				
+				var componentXml:XML = XML(event.result);
+				var content:XML = componentXml.descendants(new QName(channel.TRIDION_NS, "Content"))[0];
+				var lContent:XML = XML(content.children()[0].toString());
+				var ns:Namespace = lContent.namespace("");
+				text.contents = lContent.descendants(new QName(ns, fieldName))[0].text().toString();
+				
+				index++;
+				if (index < length) {
+					RefreshComponent(index, length, textToUpdate);
+				}
+				else {
+					Alert.show("Text components sucessfully refreshed.", "In Design Connector", Alert.OK, Sprite(mx.core.Application.application));
+				}
+			};
+			
+			var OnError:Function = function OnError(event:FaultEvent):void {
+				event.currentTarget.removeEventListener(FaultEvent.FAULT, OnError);
+				
+				index++;
+				if (index < length) {
+					RefreshComponent(index, length, textToUpdate);
+				}
+				trace(event.message.toString());	
+			};
+				
+			channel.ReadItemXml(componentId, OnComponentRead, OnError);
+		}
+		//* END UTIL FUNCTIONS *//
+		
+		// Method executed when there is an error
+		protected function OnError(error:FaultEvent):void {
+			Alert.show(error.message.toString(), "In Design Connector", Alert.OK, Sprite(mx.core.Application.application));
+		}
+	]]>
+	</mx:Script>
+	<mx:VDividedBox label="SDL Tridion" width="400" height="100%" backgroundColor="white">
+		<mx:VBox width="100%" height="50%" borderStyle="solid" borderThickness="1">
+			<mx:Spacer />
+			<mx:HBox>
+				<mx:Label>
+					<mx:text>Publication: </mx:text>
+				</mx:Label>
+				<mx:ComboBox id="cbPublications" 
+							 dataProvider="{listPublications}" 
+							 labelField="@Title"
+							 change="cbPublications_changeHandler(event)" 
+							 prompt="Please select an item..." 
+							 open="cbPublications_openHandler(event)" />
+			</mx:HBox>
+			<mx:Spacer />
+			<mx:Tree id="trPubItems" 
+					 dataProvider="{listPubItems}" 
+					 labelFunction="trPubItems_labelFunction"
+					 iconFunction="trPubItems_iconFunction" 
+					 borderStyle="none" 
+					 width="100%"
+					 height="100%" 
+					 showRoot="false" 
+					 itemOpen="trPubItems_itemOpenHandler(event)" 
+					 change="trPubItems_changeHandler(event)" />		
+		</mx:VBox>
+		<mx:VBox width="100%" height="50%" borderStyle="solid" borderThickness="1">
+			<mx:ButtonBar id="btnBarCommands" itemClick="btnBarCommands_itemClickHandler(event)">
+				<mx:dataProvider>
+					<mx:Object label="Update" />
+					<mx:Object label="Refresh" />
+					<mx:Object label="Back" />
+				</mx:dataProvider>
+			</mx:ButtonBar>
+			<mx:TabNavigator id="tabNavigator" width="100%" height="100%" visible="false">
+				<mx:VBox id="vBoxDesignFields" 
+						 label="Design" 
+						 width="100%" 
+						 height="100%" 
+						 visible="false">
+					<mx:Tree id="trDesignFields" 
+							 dataProvider="{listDesignFields}" 
+							 labelField="@Description" 
+							 borderStyle="none" 
+							 width="100%" 
+							 height="100%" 
+							 showRoot="false" 
+							 dragEnabled="true" 
+							 dragMoveEnabled="true"
+							 iconFunction="trFields_iconFunction" 
+							 doubleClickEnabled="true"
+							 dragStart="trFields_dragStartHandler(event)" 
+							 itemDoubleClick="trFields_itemDoubleClickHandler(event)"
+							 visible="true" />
+				</mx:VBox>
+				<mx:VBox id="vBoxMultimedia" 
+						 label="Multimedia" 
+						 width="100%" 
+						 height="100%" 
+						 visible="false">
+					<mx:TileList id="tlImages" 
+								 width="100%" 
+								 height="100%" 
+								 columnCount="1" 
+								 rowCount="1" 
+								 verticalAlign="middle"  
+								 dataProvider="{multimediaData}" 
+								 dragEnabled="true"
+								 dragMoveEnabled="true"
+								 dragStart="tlImages_dragStartHandler(event)">
+						<mx:itemRenderer>
+							<mx:Component>
+								<mx:VBox horizontalAlign="center" verticalAlign="middle">
+									<mx:Image id="imgMultimedia" 
+											  verticalAlign="middle" 
+											  horizontalAlign="center"
+											  width="80" 
+											  height="80" 
+											  maintainAspectRatio="true"  
+											  scaleContent="true" source="{data.Bitmap}" />
+									<mx:Label text="{data.Title}" />	
+								</mx:VBox>
+							</mx:Component>
+						</mx:itemRenderer>
+					</mx:TileList>
+				</mx:VBox>
+				<mx:VBox label="Metadata" width="100%" height="100%">
+					<mx:Tree id="trMetadataFields" 
+							 dataProvider="{listMetadataFields}" 
+							 labelField="@Description" 
+							 borderStyle="none" 
+							 width="100%" 
+							 height="100%" 
+							 showRoot="false"
+							 dragEnabled="true"
+							 dragMoveEnabled="true"
+							 iconFunction="trFields_iconFunction" 
+							 dragStart="trFields_dragStartHandler(event)" />
+				</mx:VBox>
+				<mx:VBox label="Where Used" width="100%" height="100%">
+					<mx:Tree id="trWhereUsed" 
+							 width="100%" 
+							 height="100%" 
+							 borderStyle="none"
+							 showRoot="false" dataProvider="{listUsingItems}" 
+							 labelFunction="trWhereUsed_labelFunction" 
+							 iconFunction="trWhereUsed_iconFunction" />
+				</mx:VBox>
+			</mx:TabNavigator>
+		</mx:VBox>
+	</mx:VDividedBox>
+</mx:Application>
